@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sorteio Arduino - Reflexo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+        body {
+            font-family: 'Share Tech Mono', monospace;
+            background-color: #1a1a1a;
+            color: #00ff00;
+        }
+
+        .led {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background-color: #333;
+            box-shadow: inset 0 0 5px #000;
+            transition: all 0.1s;
+        }
+
+        .led.active {
+            background-color: #00ff00;
+            box-shadow: 0 0 10px #00ff00, inset 0 0 5px #fff;
+        }
+
+        .display-screen {
+            background: #000;
+            border: 2px solid #333;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.8);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .scanline {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, transparent 50%, rgba(0, 0, 0, 0.5) 51%);
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        /* Animação para o efeito de sorteio */
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.8; transform: scale(0.98); }
+        }
+
+        .winner-anim {
+            animation: pulse-glow 0.5s ease-in-out infinite;
+        }
+
+        .btn-push {
+            transition: all 0.1s;
+            box-shadow: 0 4px 0 #4b5563;
+        }
+        .btn-push:active {
+            transform: translateY(4px);
+            box-shadow: 0 0 0 #4b5563;
+        }
+
+        /* Cores Específicas */
+        .bg-arduino-blue { background-color: #0099ff; box-shadow: 0 0 30px #0099ff; }
+        .bg-arduino-red { background-color: #ff3333; box-shadow: 0 0 30px #ff3333; }
+        .text-arduino-blue { color: #0099ff; text-shadow: 0 0 10px #0099ff; }
+        .text-arduino-red { color: #ff3333; text-shadow: 0 0 10px #ff3333; }
+    </style>
+</head>
+<body class="h-screen flex flex-col items-center justify-center p-4 selection:bg-green-900">
+
+    <!-- Container Principal -->
+    <div class="w-full max-w-md bg-gray-800 rounded-xl p-6 border-4 border-gray-700 shadow-2xl relative">
+        
+        <!-- Cabeçalho estilo Hardware -->
+        <div class="flex justify-between items-center mb-4 border-b border-gray-600 pb-2">
+            <div class="text-xs text-gray-400">ARDUINO UNO R3 SIMULATOR</div>
+            <div class="flex items-center gap-2">
+                <span class="text-xs text-gray-400">RX</span>
+                <div id="led-rx" class="led"></div>
+                <span class="text-xs text-gray-400">TX</span>
+                <div id="led-tx" class="led"></div>
+            </div>
+        </div>
+
+        <!-- Tela do Jogo -->
+        <div id="display-area" class="display-screen h-64 rounded-lg flex items-center justify-center mb-6 relative border-gray-600 border-2">
+            <div class="scanline"></div>
+            
+            <!-- Conteúdo Central -->
+            <div id="result-text" class="text-6xl font-bold z-20 text-gray-500 transition-colors duration-100 text-center">
+                AGUARDANDO<br>SINAL...
+            </div>
+        </div>
+
+        <!-- Controles -->
+        <div class="grid grid-cols-1 gap-4">
+            <button id="action-btn" class="btn-push w-full bg-gray-200 hover:bg-white text-black font-bold py-4 px-6 rounded-lg text-xl tracking-widest uppercase border-2 border-gray-400">
+                INICIAR SISTEMA
+            </button>
+        </div>
+
+        <!-- Monitor Serial Falso -->
+        <div class="mt-6 bg-black p-3 rounded border border-gray-700 h-32 overflow-hidden font-mono text-xs opacity-80">
+            <div class="text-gray-500 border-b border-gray-800 mb-1">SERIAL MONITOR (9600 baud)</div>
+            <div id="serial-log" class="flex flex-col-reverse h-24 overflow-y-auto text-green-500">
+                <!-- Logs vão aqui -->
+                <div>> Sistema inicializado...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Elementos do DOM
+        const displayArea = document.getElementById('display-area');
+        const resultText = document.getElementById('result-text');
+        const actionBtn = document.getElementById('action-btn');
+        const serialLog = document.getElementById('serial-log');
+        const ledRx = document.getElementById('led-rx');
+        const ledTx = document.getElementById('led-tx');
+
+        // Estado do Jogo
+        let isRunning = false;
+        let isCountingDown = false; // Novo estado para controlar a contagem
+        let intervalId = null;
+        let blinkState = false;
+        let forcedWinner = null; // Variável para armazenar o resultado manipulado
+
+        // Função para logar no monitor serial falso
+        function log(msg) {
+            const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
+            const line = document.createElement('div');
+            line.innerHTML = `<span class="text-gray-600">[${time}]</span> ${msg}`;
+            serialLog.prepend(line);
+            
+            // Piscar LED TX quando logar
+            ledTx.classList.add('active');
+            setTimeout(() => ledTx.classList.remove('active'), 100);
+        }
+
+        // Função de Contagem Regressiva
+        function startCountdown() {
+            isCountingDown = true;
+            
+            // Atualiza UI para modo de carga
+            actionBtn.innerText = "INICIALIZANDO...";
+            actionBtn.classList.add('opacity-75', 'cursor-wait');
+            
+            // Limpa o display
+            displayArea.className = "display-screen h-64 rounded-lg flex items-center justify-center mb-6 relative border-gray-600 border-2";
+            displayArea.style.backgroundColor = "";
+            resultText.className = "text-9xl font-bold z-20 text-yellow-500 font-mono";
+            
+            let count = 3;
+            resultText.innerText = count;
+            log(`Boot sequence: ${count}...`);
+
+            const countTimer = setInterval(() => {
+                count--;
+                if(count > 0) {
+                    resultText.innerText = count;
+                    log(`Boot sequence: ${count}...`);
+                } else {
+                    clearInterval(countTimer);
+                    isCountingDown = false;
+                    actionBtn.classList.remove('opacity-75', 'cursor-wait');
+                    startLoop(); // Inicia o loop real após a contagem
+                }
+            }, 800); // 800ms para ser um pouco mais rápido que 1s
+        }
+
+        // Função para iniciar o sorteio (loop visual)
+        function startLoop() {
+            isRunning = true;
+            actionBtn.innerText = "PROCESSANDO DADOS...";
+            actionBtn.classList.remove('bg-gray-200');
+            actionBtn.classList.add('bg-yellow-500', 'border-yellow-600');
+            
+            log("Loop iniciado. Coletando entropia...");
+            
+            // Ajusta texto para o loop
+            resultText.className = "text-8xl font-bold z-20 text-white transition-colors duration-0";
+
+            // Loop visual
+            intervalId = setInterval(() => {
+                blinkState = !blinkState;
+                
+                // Piscar LED RX simulando recebimento de dados
+                if(Math.random() > 0.5) ledRx.classList.add('active');
+                else ledRx.classList.remove('active');
+
+                if (blinkState) {
+                    displayArea.style.backgroundColor = "#0099ff"; // Azul
+                    resultText.innerText = "AZUL";
+                } else {
+                    displayArea.style.backgroundColor = "#ff3333"; // Vermelho
+                    resultText.innerText = "VERMELHO";
+                }
+            }, 30); // Acelerado para 30ms
+
+            // PARADA AUTOMÁTICA APÓS 0.5 SEGUNDOS (500ms)
+            setTimeout(() => {
+                if(isRunning) {
+                    stopLoop();
+                }
+            }, 500);
+        }
+
+        // Função para parar e decidir o vencedor
+        function stopLoop() {
+            clearInterval(intervalId);
+            isRunning = false;
+            ledRx.classList.remove('active');
+            
+            let winner;
+
+            // Lógica do Truque
+            if (forcedWinner) {
+                winner = forcedWinner; // Usa o resultado forçado pela tecla
+            } else {
+                // Se foi pelo clique do mouse (sem tecla), é aleatório
+                winner = Math.random() < 0.5 ? 'AZUL' : 'VERMELHO';
+            }
+            
+            log(`Interrupção manual recebida. Resultado: ${winner}`);
+            
+            // Atualizar UI com o vencedor
+            displayArea.style.backgroundColor = ""; // Limpa cor inline
+            
+            if (winner === 'AZUL') {
+                displayArea.classList.add('bg-arduino-blue', 'winner-anim');
+                resultText.className = "text-6xl font-bold z-20 text-white drop-shadow-md";
+                resultText.innerHTML = "RESULTADO:<br>AZUL";
+            } else {
+                displayArea.classList.add('bg-arduino-red', 'winner-anim');
+                resultText.className = "text-6xl font-bold z-20 text-white drop-shadow-md";
+                resultText.innerHTML = "RESULTADO:<br>VERMELHO";
+            }
+
+            // Resetar botão e limpar o vencedor forçado para a próxima rodada
+            actionBtn.innerText = "REINICIAR";
+            actionBtn.classList.remove('bg-yellow-500', 'border-yellow-600');
+            actionBtn.classList.add('bg-gray-200');
+            forcedWinner = null; 
+        }
+
+        // Controlador Principal
+        function toggleGame() {
+            // Se estiver contando, ignora cliques
+            if (isCountingDown) return;
+
+            if (isRunning) {
+                stopLoop();
+            } else {
+                startCountdown(); // Agora chama a contagem primeiro
+            }
+        }
+
+        // Event Listeners
+        // Clique no botão (sempre aleatório, pois não define forcedWinner)
+        actionBtn.addEventListener('click', () => {
+            forcedWinner = null; // Garante que seja aleatório no clique
+            toggleGame();
+        });
+
+        // Atalhos de teclado (O TRUQUE)
+        document.addEventListener('keydown', (e) => {
+            // Ignora se o jogo já estiver rodando ou contando
+            if (isCountingDown || isRunning) return;
+
+            if (e.key === 'Control') {
+                e.preventDefault();
+                forcedWinner = 'AZUL'; // Define Azul
+                toggleGame();
+                animateButton();
+            }
+            else if (e.key === 'Alt') {
+                e.preventDefault();
+                forcedWinner = 'VERMELHO'; // Define Vermelho
+                toggleGame();
+                animateButton();
+            }
+        });
+
+        function animateButton() {
+             actionBtn.classList.add('active');
+             actionBtn.style.transform = "translateY(4px)";
+             setTimeout(() => {
+                 actionBtn.style.transform = "translateY(0)";
+             }, 100);
+        }
+
+    </script>
+</body>
+</html>
